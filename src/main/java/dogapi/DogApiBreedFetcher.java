@@ -14,45 +14,50 @@ public class DogApiBreedFetcher implements BreedFetcher {
     private final OkHttpClient client = new OkHttpClient();
 
     @Override
-    public List<String> getSubBreeds(String breed)
-            throws BreedFetcher.BreedNotFoundException {
-
+    public List<String> getSubBreeds(String breed) throws BreedFetcher.BreedNotFoundException {
         if (breed == null || breed.isBlank()) {
             throw new BreedFetcher.BreedNotFoundException("Breed name cannot be empty.");
         }
 
         final String url = "https://dog.ceo/api/breed/" + breed + "/list";
+        final int maxAttempts = 3; // small retry to survive transient network issues
+        IOException lastIo = null;
 
-        try {
-            Request request = new Request.Builder().url(url).build();
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                Request request = new Request.Builder().url(url).build();
+                try (Response response = client.newCall(request).execute()) {
+                    if (response.body() == null) {
+                        throw new IOException("Empty response body");
+                    }
 
-            // try-with-resources so Response is closed
-            try (Response response = client.newCall(request).execute()) {
-                if (response.body() == null) {
-                    throw new IOException("Empty response body");
+                    String body = response.body().string();
+                    JSONObject json = new JSONObject(body);
+                    String status = json.optString("status", "");
+
+                    if ("error".equals(status)) {
+                        // API says the breed doesn't exist
+                        throw new BreedFetcher.BreedNotFoundException("Breed not found: " + breed);
+                    }
+
+                    JSONArray msg = json.getJSONArray("message");
+                    List<String> result = new ArrayList<>(msg.length());
+                    for (int i = 0; i < msg.length(); i++) {
+                        result.add(msg.getString(i));
+                    }
+                    return result; // success
                 }
-
-                String body = response.body().string();
-                JSONObject json = new JSONObject(body);
-                String status = json.optString("status", "");
-
-                if ("error".equals(status)) {
-                    // API’s 404 case: breed doesn’t exist
-                    throw new BreedFetcher.BreedNotFoundException("Breed not found: " + breed);
+            } catch (IOException io) {
+                lastIo = io;
+                try {
+                    Thread.sleep(150L);
+                } catch (InterruptedException ignored) {
                 }
-
-                // success: pull the sub-breed array
-                JSONArray message = json.getJSONArray("message");
-                List<String> result = new ArrayList<>(message.length());
-                for (int i = 0; i < message.length(); i++) {
-                    result.add(message.getString(i));
-                }
-                return result;
             }
-        } catch (IOException e) {
-            // Map any I/O/parse problem to the required exception
-            throw new BreedFetcher.BreedNotFoundException(
-                    "Failed to fetch data for '" + breed + "': " + e.getMessage());
         }
+
+        // after retries, map to the required exception type
+        throw new BreedFetcher.BreedNotFoundException(
+                "Failed to fetch data for '" + breed + "': " + (lastIo != null ? lastIo.getMessage() : "unknown I/O error"));
     }
 }
